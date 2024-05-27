@@ -61,7 +61,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, str]) -> dict[str,
     appliances_manager = AppliancesManager(backend_selector, auth, session)
     await appliances_manager.fetch_appliances()
 
-    if not appliances_manager.aircons and not appliances_manager.washer_dryers:
+    if not appliances_manager.aircons and not appliances_manager.washer_dryers and not appliances_manager.ovens:
         raise NoAppliances
 
     return {"title": data[CONF_USERNAME]}

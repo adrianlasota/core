@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 
+from whirlpool.oven import CavityState, Oven, CookMode
 from whirlpool.washerdryer import MachineState, WasherDryer
 
 from homeassistant.components.sensor import (
@@ -66,7 +67,11 @@ CYCLE_FUNC = [
     (WasherDryer.get_cycle_status_washing, "cycle_washing"),
 ]
 
+OVEN_STATES = [f"oven_{state.name.lower()}" for state in CavityState]
+COOK_MODES = [f"cook_{state.name.lower()}" for state in CookMode]
+
 DOOR_OPEN = "door_open"
+ICON_O = "mdi:stove"
 ICON_D = "mdi:tumble-dryer"
 ICON_W = "mdi:washing-machine"
 
@@ -88,6 +93,23 @@ def washer_state(washer: WasherDryer) -> str | None:
                 return cycle_name
 
     return MACHINE_STATE.get(machine_state)
+
+
+def oven_state(machine: Oven) -> str | None:
+    """Determine correct states for an oven."""
+
+    if machine.get_door_opened():
+        return DOOR_OPEN
+
+    return f"oven_{machine.get_cavity_state().name.lower()}"
+
+def cook_mode(machine: Oven) -> str | None:
+    """Determine correct states for an oven."""
+
+    if machine.get_door_opened():
+        return DOOR_OPEN
+
+    return f"cook_{machine.get_cook_mode().name.lower()}"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -120,7 +142,27 @@ SENSORS: tuple[WhirlpoolSensorEntityDescription, ...] = (
         ),
     ),
 )
-
+OVEN_SENSORS: tuple[WhirlpoolSensorEntityDescription, ...] = (
+    WhirlpoolSensorEntityDescription(
+        key="state",
+        translation_key="whirlpool_machine",
+        device_class=SensorDeviceClass.ENUM,
+        options=(
+            [value for value in OVEN_STATES]
+            + [DOOR_OPEN]
+        ),
+        value_fn=oven_state,
+    ), WhirlpoolSensorEntityDescription(
+        key="state",
+        translation_key="whirlpool_machine",
+        device_class=SensorDeviceClass.ENUM,
+        options=(
+            [value for value in COOK_MODES]
+            + [DOOR_OPEN]
+        ),
+        value_fn=cook_mode,
+    ),
+)
 SENSOR_TIMER: tuple[SensorEntityDescription] = (
     SensorEntityDescription(
         key="timeremaining",
@@ -135,7 +177,7 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Config flow entry for Whrilpool Laundry."""
+    """Config flow entry for Whirlpool."""
     entities: list = []
     whirlpool_data: WhirlpoolData = hass.data[DOMAIN][config_entry.entry_id]
     for appliance in whirlpool_data.appliances_manager.washer_dryers:
@@ -169,7 +211,160 @@ async def async_setup_entry(
                 for description in SENSOR_TIMER
             ]
         )
+    for appliance in whirlpool_data.appliances_manager.ovens:
+        _ov = Oven(
+            whirlpool_data.backend_selector,
+            whirlpool_data.auth,
+            appliance["SAID"],
+            async_get_clientsession(hass),
+        )
+        await _ov.connect()
+
+        entities.extend(
+            [
+                OvenClass(
+                    appliance["SAID"],
+                    appliance["NAME"],
+                    description,
+                    _ov,
+                )
+                for description in OVEN_SENSORS
+            ]
+        )
+        entities.extend(
+            [
+                OvenTimeClass(
+                    appliance["SAID"],
+                    appliance["NAME"],
+                    description,
+                    _ov,
+                )
+                for description in SENSOR_TIMER
+            ]
+        )
     async_add_entities(entities)
+
+
+class OvenClass(SensorEntity):
+    """A class for the whirlpool/maytag oven account."""
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        said: str,
+        name: str,
+        description: WhirlpoolSensorEntityDescription,
+        oven: Oven,
+    ) -> None:
+        """Initialize the oven sensor."""
+        self._ov: Oven = oven
+
+        self._attr_icon = ICON_O
+
+        self.entity_description: WhirlpoolSensorEntityDescription = description
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, said)},
+            name=name.capitalize(),
+            manufacturer="Whirlpool",
+        )
+        self._attr_unique_id = f"{said}-{description.key}"
+
+    async def async_added_to_hass(self) -> None:
+        """Connect oven to the cloud."""
+        self._ov.register_attr_callback(self.async_write_ha_state)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Close Whirlpool Appliance sockets before removing."""
+        self._ov.unregister_attr_callback(self.async_write_ha_state)
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self._ov.get_online()
+
+    @property
+    def native_value(self) -> StateType | str:
+        """Return native value of sensor."""
+        return self.entity_description.value_fn(self._ov)
+
+
+class OvenTimeClass(RestoreSensor):
+    """A timestamp class for the whirlpool/maytag oven account."""
+
+    _attr_should_poll = True
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        said: str,
+        name: str,
+        description: SensorEntityDescription,
+        oven: Oven,
+    ) -> None:
+        """Initialize the oven sensor."""
+        self._ov: Oven = oven
+
+        self._attr_icon = ICON_O
+
+        self.entity_description: SensorEntityDescription = description
+        self._running: bool | None = None
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, said)},
+            name=name.capitalize(),
+            manufacturer="Whirlpool",
+        )
+        self._attr_unique_id = f"{said}-{description.key}"
+
+    async def async_added_to_hass(self) -> None:
+        """Connect oven to the cloud."""
+        if restored_data := await self.async_get_last_sensor_data():
+            self._attr_native_value = restored_data.native_value
+        await super().async_added_to_hass()
+        self._ov.register_attr_callback(self.update_from_latest_data)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Close Whirlpool Appliance sockets before removing."""
+        self._ov.unregister_attr_callback(self.update_from_latest_data)
+        await self._ov.disconnect()
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self._ov.get_online()
+
+    async def async_update(self) -> None:
+        """Update status of Whirlpool."""
+        await self._ov.fetch_data()
+
+    @callback
+    def update_from_latest_data(self) -> None:
+        """Calculate the time stamp for completion."""
+        machine_state = self._ov.get_cavity_state()
+        now = utcnow()
+        if (
+            machine_state is CavityState.Standby
+            and self._running
+        ):
+            self._running = False
+            self._attr_native_value = now
+            self._async_write_ha_state()
+
+        if machine_state is CavityState.Cooking:
+            self._running = True
+
+            new_timestamp = now + timedelta(
+                seconds=int(self._ov.get_attribute("OvenUpperCavity_TimeStatusCookTimeRemaining"))
+            )
+
+            if (
+                self._attr_native_value is None
+                or isinstance(self._attr_native_value, datetime)
+                and abs(new_timestamp - self._attr_native_value) > timedelta(seconds=60)
+            ):
+                self._attr_native_value = new_timestamp
+                self._async_write_ha_state()
 
 
 class WasherDryerClass(SensorEntity):
