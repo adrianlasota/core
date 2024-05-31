@@ -105,11 +105,11 @@ def oven_state(machine: Oven) -> str | None:
 
 def cook_mode(machine: Oven) -> str | None:
     """Determine correct states for an oven."""
-
-    if machine.get_door_opened():
-        return DOOR_OPEN
-
     return f"cook_{machine.get_cook_mode().name.lower()}"
+
+def is_oven_online(machine: Oven) -> bool:
+    """Determine online status of an oven."""
+    return machine.get_online()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -144,23 +144,28 @@ SENSORS: tuple[WhirlpoolSensorEntityDescription, ...] = (
 )
 OVEN_SENSORS: tuple[WhirlpoolSensorEntityDescription, ...] = (
     WhirlpoolSensorEntityDescription(
-        key="state",
-        translation_key="whirlpool_machine",
+        key="oven_state",
+        name="Oven State",
         device_class=SensorDeviceClass.ENUM,
         options=(
             [value for value in OVEN_STATES]
             + [DOOR_OPEN]
         ),
         value_fn=oven_state,
-    ), WhirlpoolSensorEntityDescription(
-        key="state",
-        translation_key="whirlpool_machine",
+    ),
+    WhirlpoolSensorEntityDescription(
+        key="cook_mode",
+        name="Cook Mode",
         device_class=SensorDeviceClass.ENUM,
-        options=(
-            [value for value in COOK_MODES]
-            + [DOOR_OPEN]
-        ),
+        options=COOK_MODES,
         value_fn=cook_mode,
+    ),
+    WhirlpoolSensorEntityDescription(
+        key="online_status",
+        name="Status of connection",
+        device_class=SensorDeviceClass.ENUM,
+        options=[True, False],
+        value_fn=is_oven_online,
     ),
 )
 SENSOR_TIMER: tuple[SensorEntityDescription] = (
